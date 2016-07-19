@@ -5,9 +5,9 @@ This TeamSpeak 3 plugin allows to view Overwatch player statistics.
 
 This plugin is in the early alpha preview phase. Bugs are expected to happen, please report them in the [issue list](https://github.com/drywolf/ts3-overwatch-stats-plugin/issues).
 
-### Download
+### Downloads
 
-- TBD
+- [0.1-alpha-preview-x64](https://github.com/drywolf/ts3-overwatch-stats-plugin/releases/tag/0.1-alpha-preview-x64)
 
 ### Features
 
