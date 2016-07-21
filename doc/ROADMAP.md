@@ -2,6 +2,7 @@
 
 - [ ] perform player-stats data fetch in a separate thread to not block the TS3 ui
 - [ ] show a `summary` and/or `average` line in the TS3 log-area when printing players stats for a channel
+- [ ] make Battle-Tag detection in TS3 client-names more flexible (e.g. handle `name # 1234`, `name #1234`, `name / #1234`
 
 # History
 
