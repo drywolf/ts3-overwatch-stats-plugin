@@ -1,10 +1,13 @@
 # Roadmap
 
-- [ ] perform player-stats data fetch in a separate thread to not block the TS3 ui
-- [ ] show a `summary` and/or `average` line in the TS3 log-area when printing players stats for a channel
 - [ ] make Battle-Tag detection in TS3 client-names more flexible (e.g. handle `name # 1234`, `name #1234`, `name / #1234`
+- [ ] use `conan` to also install `libcurl` build dependency
 
 # History
+
+### 0.2a-preview
+- perform player-stats data fetch in a separate thread to not block the TS3 ui
+- show a `summary` and/or `average` line in the TS3 log-area when printing players stats for a channel
 
 ### 0.1a-preview
 - show stats for a single player in the TS3 client-info area in channel list (triggered by selecting clients)

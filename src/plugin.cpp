@@ -29,28 +29,76 @@
 // std
 #include <algorithm>
 #include <string>
+#include <queue>
 #include <vector>
 
-typedef struct OWPlayerData
+// boost
+#include <boost/thread.hpp>
+
+class OWPlayerData
 {
-	char* ts3name;
+public: OWPlayerData()
+	{
+		ts3name = nullptr;
 
-	char* battleTag;
-	char* statsTag;
+		battleTag = nullptr;
+		statsTag = nullptr;
 
-	int level;
-	int prestige;
+		level = 0;
+		prestige = 0;
 
-	int losses;
-	int wins;
+		losses = 0;
+		wins = 0;
 
-	int games;
+		games = 0;
+		comp_rank = 0;
+	}
 
-	int comp_rank;
+public: ~OWPlayerData()
+	{
+		if (ts3name)
+		{
+			free(ts3name);
+			ts3name = nullptr;
+		}
 
-} OWPlayerData;
+		if (battleTag)
+		{
+			free(battleTag);
+			battleTag = nullptr;
+		}
 
-typedef std::vector<OWPlayerData> OWPlayerDataList;
+		if (statsTag)
+		{
+			free(statsTag);
+			statsTag = nullptr;
+		}
+	}
+
+public: char* ts3name;
+
+public: char* battleTag;
+public: char* statsTag;
+
+public: int level;
+public: int prestige;
+
+public: int losses;
+public: int wins;
+
+public: int games;
+
+public: int comp_rank;
+};
+
+typedef struct OWChannelStatsRequest
+{
+	uint64 serverConnectionHandlerID;
+	anyID channelID;
+
+} OWChannelStatsRequest;
+
+typedef std::vector<OWPlayerData*> OWPlayerDataList;
 
 static struct TS3Functions ts3Functions;
 
@@ -71,8 +119,6 @@ static struct TS3Functions ts3Functions;
 #define RETURNCODE_BUFSIZE 128
 
 static char* pluginID = NULL;
-
-extern "C" {
 
 #ifdef _WIN32
 /* Helper function to convert wchar_T to Utf-8 encoded strings on Windows */
@@ -249,6 +295,33 @@ void ts3plugin_setFunctionPointers(const struct TS3Functions funcs) {
 
 void* curl;
 
+boost::mutex mutexChannelStatsRequests;
+boost::condition_variable conditionChannelStatsRequests;
+std::queue<OWChannelStatsRequest> channelStatsRequests;
+
+bool runHandleChannelStats = true;
+boost::thread* threadHandleChannelStats;
+
+void handleChannelPlayerStats(const OWChannelStatsRequest& req);
+
+void handleChannelStats()
+{
+	boost::mutex::scoped_lock lock(mutexChannelStatsRequests);
+
+	while (runHandleChannelStats)
+	{
+		conditionChannelStatsRequests.wait(lock);
+
+		if (!channelStatsRequests.empty())
+		{
+			OWChannelStatsRequest req = channelStatsRequests.front();
+			channelStatsRequests.pop();
+
+			handleChannelPlayerStats(req);
+		}
+	}
+}
+
 /*
  * Custom code called right after loading the plugin. Returns 0 on success, 1 on failure.
  * If the function returns 1 on failure, the plugin will be unloaded again.
@@ -270,12 +343,14 @@ int ts3plugin_init() {
 	ts3Functions.getPluginPath(pluginPath, PATH_BUFSIZE);
 
 	printf("PLUGIN: App path: %s\nResources path: %s\nConfig path: %s\nPlugin path: %s\n", appPath, resourcesPath, configPath, pluginPath);
-
+	
 	curl = curl_easy_init();
 
 	init_utf8_digits();
 
 	wcharToUtf8(L"        ", &player_separator);
+
+	threadHandleChannelStats = new boost::thread(handleChannelStats);
 
     return 0;  /* 0 = success, 1 = failure, -2 = failure but client will not show a "failed to load" warning */
 	/* -2 is a very special case and should only be used if a plugin displays a dialog (e.g. overlay) asking the user to disable
@@ -287,6 +362,16 @@ int ts3plugin_init() {
 void ts3plugin_shutdown() {
     /* Your plugin cleanup code here */
     printf("PLUGIN: shutdown\n");
+
+	if (threadHandleChannelStats)
+	{
+		conditionChannelStatsRequests.notify_one();
+
+		runHandleChannelStats = false;
+		threadHandleChannelStats->join();
+		delete threadHandleChannelStats;
+		threadHandleChannelStats = nullptr;
+	}
 
 	curl_easy_cleanup(curl);
 
@@ -382,7 +467,8 @@ char* download(const char* url)
 	curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 	curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1); //Prevent "longjmp causes uninitialized stack frame" bug
 	curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "deflate");
-
+	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5);
+	
 	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writefunc);
 	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &s);
 
@@ -432,21 +518,9 @@ int findProperty(char* html, const char* prop_prefix, const int default)
 	return result;
 }
 
-int getPlayerData(uint64 serverConnectionHandlerID, anyID clientID, OWPlayerData* result)
+OWPlayerData* getPlayerData(uint64 serverConnectionHandlerID, anyID clientID)
 {
-	result->ts3name = NULL;
-
-	result->battleTag = NULL;
-	result->statsTag = NULL;
-
-	result->level = 0;
-	result->prestige = 0;
-
-	result->losses = 0;
-	result->wins = 0;
-
-	result->games = 0;
-	result->comp_rank = 0;
+	OWPlayerData* result = new OWPlayerData();
 
 	char clientName[256];
 	ts3Functions.getClientDisplayName(serverConnectionHandlerID, clientID, clientName, 256);
@@ -466,7 +540,7 @@ int getPlayerData(uint64 serverConnectionHandlerID, anyID clientID, OWPlayerData
 
 	if (hashIdx < 0)
 	{
-		return 0;
+		return result;
 	}
 
 	int nameStart = -1;
@@ -492,7 +566,7 @@ int getPlayerData(uint64 serverConnectionHandlerID, anyID clientID, OWPlayerData
 
 	if (nameStart < 0)
 	{
-		return 0;
+		return result;
 	}
 
 	int nameEnd = -1;
@@ -515,7 +589,7 @@ int getPlayerData(uint64 serverConnectionHandlerID, anyID clientID, OWPlayerData
 
 	if (nameEnd < 0)
 	{
-		return 0;
+		return result;
 	}
 
 	char battleTag[256];
@@ -535,7 +609,7 @@ int getPlayerData(uint64 serverConnectionHandlerID, anyID clientID, OWPlayerData
 	char* battleHtml = download(battleUrl);
 
 	if (battleHtml == 0)
-		return 0;
+		return result;
 
 	// lookup stats
 	int prestige = findProperty(battleHtml, "\"prestige\": ", 0);
@@ -559,28 +633,7 @@ int getPlayerData(uint64 serverConnectionHandlerID, anyID clientID, OWPlayerData
 	result->games = games;
 	result->comp_rank = comp_rank;
 
-	return 0;
-}
-
-void freePlayerData(OWPlayerData* player_data)
-{
-	if (player_data->ts3name)
-	{
-		free(player_data->ts3name);
-		player_data->ts3name = NULL;
-	}
-
-	if (player_data->battleTag)
-	{
-		free(player_data->battleTag);
-		player_data->battleTag = NULL;
-	}
-
-	if (player_data->statsTag)
-	{
-		free(player_data->statsTag);
-		player_data->statsTag = NULL;
-	}
+	return result;
 }
 
 char* getPrestigeString(const OWPlayerData* player_data, const bool& table_format)
@@ -655,28 +708,87 @@ char* getStatsURL(const OWPlayerData* player_data)
 	return strdup(statsUrl);
 }
 
-bool sortPlayerList(const OWPlayerData& a, const OWPlayerData& b)
+bool sortPlayerList(const OWPlayerData* a, const OWPlayerData* b)
 {
-	if (a.prestige > b.prestige)
+	if (a->prestige > b->prestige)
 		return true;
 
-	if (a.prestige == b.prestige)
-		return a.level > b.level;
+	if (a->prestige == b->prestige)
+		return a->level > b->level;
 
 	return false;
 }
 
 void printChannelPlayerStats(uint64 serverConnectionHandlerID, anyID channelID)
 {
+	char msg[512];
+	sprintf(msg, "Querying channel stats, please wait...");
+	ts3Functions.printMessageToCurrentTab(msg);
+
+	boost::mutex::scoped_lock lock(mutexChannelStatsRequests);
+
+	OWChannelStatsRequest req;
+	req.serverConnectionHandlerID = serverConnectionHandlerID;
+	req.channelID = channelID;
+
+	const bool was_empty = channelStatsRequests.empty();
+	channelStatsRequests.push(req);
+
+	lock.unlock();
+
+	//if (was_empty)
+	{
+		conditionChannelStatsRequests.notify_one();
+	}
+}
+
+void printPlayerStats(OWPlayerData* player_data)
+{
+	char msg[512];
+	char* prestige = getPrestigeString(player_data, true);
+	float win_percent = getWinPercent(player_data);
+	const char* win_percent_color = win_percent < 50.0 ? "#b85813" : "#588c01";
+	const char* comp_rank_color = player_data->comp_rank != 0 && player_data->comp_rank < 50 ? "#b85813" : "#588c01";
+	char* stats_url = getStatsURL(player_data);
+
+	sprintf(msg, PlayerInfoFormatStr,
+		player_data->level,
+		prestige,
+		win_percent_color,
+		win_percent,
+		comp_rank_color,
+		player_data->comp_rank,
+		player_data->games,
+		player_separator,
+		player_data->ts3name,
+		stats_url
+	);
+
+	if (prestige)
+		free(prestige);
+
+	if (stats_url)
+		free(stats_url);
+
+	ts3Functions.printMessageToCurrentTab(msg);
+}
+
+void printSeparator()
+{
+	ts3Functions.printMessageToCurrentTab("------------------------------------------------------------------------------------------------------------------------------------------------------");
+}
+
+void handleChannelPlayerStats(const OWChannelStatsRequest& req)
+{
 	anyID* channelClientIDs;
 
-	if (ts3Functions.getChannelClientList(serverConnectionHandlerID, channelID, &channelClientIDs) != ERROR_ok) {
+	if (ts3Functions.getChannelClientList(req.serverConnectionHandlerID, req.channelID, &channelClientIDs) != ERROR_ok) {
 		ts3Functions.printMessageToCurrentTab("Error querying channel client list");
 		return;
 	}	
 
 	char* channelName;
-	if (ts3Functions.getChannelVariableAsString(serverConnectionHandlerID, channelID, CHANNEL_NAME, &channelName) != ERROR_ok) {
+	if (ts3Functions.getChannelVariableAsString(req.serverConnectionHandlerID, req.channelID, CHANNEL_NAME, &channelName) != ERROR_ok) {
 		channelName = strdup("???");
 	}
 	
@@ -687,8 +799,8 @@ void printChannelPlayerStats(uint64 serverConnectionHandlerID, anyID channelID)
 
 	while ((clientID = channelClientIDs[cliendIdx++]) != NULL)
 	{
-		OWPlayerData temp;
-		if (!getPlayerData(serverConnectionHandlerID, clientID, &temp))
+		OWPlayerData* temp;
+		if (temp = getPlayerData(req.serverConnectionHandlerID, clientID))
 		{
 			channel_player_stats.push_back(temp);
 		}
@@ -696,44 +808,71 @@ void printChannelPlayerStats(uint64 serverConnectionHandlerID, anyID channelID)
 
 	std::sort(channel_player_stats.begin(), channel_player_stats.end(), sortPlayerList);
 	
-	ts3Functions.printMessageToCurrentTab("------------------------------------------------------------------------------------------------------------------------------------------------------");
+	printSeparator();
 	ts3Functions.printMessageToCurrentTab(channelName);
-	ts3Functions.printMessageToCurrentTab("------------------------------------------------------------------------------------------------------------------------------------------------------");
+	printSeparator();
 
 	free(channelName);
 
+	OWPlayerData avg;
+	int level_count = 0;
+	int comp_rank_count = 0;
+	int games_count = 0;
+	
 	for (OWPlayerDataList::iterator it = channel_player_stats.begin();
 		it != channel_player_stats.end();
 		++it)
 	{
-		OWPlayerData& player_data = *it;
+		OWPlayerData* player_data = *it;
 
-		char msg[512];
-		char* prestige = getPrestigeString(&player_data, true);
-		float win_percent = getWinPercent(&player_data);
-		const char* win_percent_color = win_percent < 50.0 ? "#b85813" : "#588c01";
-		const char* comp_rank_color = player_data.comp_rank != 0 && player_data.comp_rank < 50 ? "#b85813" : "#588c01";
-		char* stats_url = getStatsURL(&player_data);
+		if (player_data->level != 0)
+		{
+			avg.level += player_data->level;
+			avg.prestige += player_data->prestige;
+			++level_count;
+		}
 
-		sprintf(msg, PlayerInfoFormatStr,
-			player_data.level,
-			prestige,
-			win_percent_color,
-			win_percent,
-			comp_rank_color,
-			player_data.comp_rank,
-			player_data.games,
-			player_separator,
-			player_data.ts3name,
-			stats_url
-		);
+		if (player_data->wins != 0 && player_data->losses != 0)
+		{
+			avg.wins += player_data->wins;
+			avg.losses += player_data->losses;
+		}
 
-		free(prestige);
-		free(stats_url);
+		if (player_data->comp_rank != 0)
+		{
+			avg.comp_rank += player_data->comp_rank;
+			++comp_rank_count;
+		}
 
-		freePlayerData(&player_data);
+		if (player_data->games != 0)
+		{
+			avg.games += player_data->games;
+			++games_count;
+		}
 
-		ts3Functions.printMessageToCurrentTab(msg);
+		printPlayerStats(player_data);
+
+		delete player_data;
+	}
+
+	// calculate averages
+	int total_level_avg = level_count != 0 ? round((avg.prestige * 101 + avg.level) / (double)level_count) : 0;
+
+	avg.prestige = total_level_avg / 100;
+	avg.level = total_level_avg % 101; // level can be 100 before proceeding to the next prestige level
+
+	avg.comp_rank = comp_rank_count != 0 ? (int)round(avg.comp_rank / (double)comp_rank_count) : 0;
+
+	avg.games = games_count != 0 ? avg.games / games_count : 0;
+	
+	printSeparator();
+
+	if (channel_player_stats.size() > 1)
+	{
+		ts3Functions.printMessageToCurrentTab("Channel-Average:");
+		printPlayerStats(&avg);
+
+		printSeparator();
 	}
 
 	ts3Functions.printMessageToCurrentTab("");
@@ -802,7 +941,7 @@ int ts3plugin_processCommand(uint64 serverConnectionHandlerID, const char* comma
 
 /* Client changed current server connection handler */
 void ts3plugin_currentServerConnectionChanged(uint64 serverConnectionHandlerID) {
-    printf("PLUGIN: currentServerConnectionChanged %llu (%llu)\n", (long long unsigned int)serverConnectionHandlerID, (long long unsigned int)ts3Functions.getCurrentServerConnectionHandlerID());
+	printf("PLUGIN: currentServerConnectionChanged %llu (%llu)\n", (long long unsigned int)serverConnectionHandlerID, (long long unsigned int)ts3Functions.getCurrentServerConnectionHandlerID());
 }
 
 /*
@@ -823,8 +962,6 @@ const char* ts3plugin_infoTitle() {
  */
 void ts3plugin_infoData(uint64 serverConnectionHandlerID, uint64 id, enum PluginItemType type, char** data) {
 
-	OWPlayerData player_data;
-
 	/* For demonstration purpose, display the name of the currently selected server, channel or client. */
 	switch(type) {
 		//case PLUGIN_SERVER:
@@ -841,7 +978,9 @@ void ts3plugin_infoData(uint64 serverConnectionHandlerID, uint64 id, enum Plugin
 		//	break;
 		case PLUGIN_CLIENT:
 			{
-				if (getPlayerData(serverConnectionHandlerID, id, &player_data))
+				OWPlayerData* player_data = NULL;
+
+				if ((player_data = getPlayerData(serverConnectionHandlerID, id)) == NULL)
 				{
 					char* clientName;
 					if(ts3Functions.getClientVariableAsString(serverConnectionHandlerID, (anyID)id, CLIENT_NICKNAME, &clientName) != ERROR_ok) {
@@ -853,6 +992,34 @@ void ts3plugin_infoData(uint64 serverConnectionHandlerID, uint64 id, enum Plugin
 					ts3Functions.printMessageToCurrentTab(msg);
 					return;
 				}
+
+				*data = (char*)malloc(INFODATA_BUFSIZE * sizeof(char));  /* Must be allocated in the plugin! */
+				char* prestige = getPrestigeString(player_data, false);
+				float win_percent = getWinPercent(player_data);
+				const char* win_percent_color = win_percent < 50.0 ? "#b85813" : "#588c01";
+				const char* comp_rank_color = player_data->comp_rank != 0 && player_data->comp_rank < 50 ? "#b85813" : "#588c01";
+				char* stats_url = getStatsURL(player_data);
+
+				snprintf(*data, INFODATA_BUFSIZE, PlayerInfoFormatStr,
+					player_data->level,
+					prestige,
+					win_percent_color,
+					win_percent,
+					comp_rank_color,
+					player_data->comp_rank,
+					player_data->games,
+					"",
+					"",
+					stats_url
+				);  /* bbCode is supported. HTML is not supported */
+
+				if (prestige)
+					free(prestige);
+
+				if (stats_url)
+					free(stats_url);
+
+				delete player_data;
 			}
 			break;
 		default:
@@ -860,31 +1027,6 @@ void ts3plugin_infoData(uint64 serverConnectionHandlerID, uint64 id, enum Plugin
 			data = NULL;  /* Ignore */
 			return;
 	}
-
-	*data = (char*)malloc(INFODATA_BUFSIZE * sizeof(char));  /* Must be allocated in the plugin! */
-	char* prestige = getPrestigeString(&player_data, false);
-	float win_percent = getWinPercent(&player_data);
-	const char* win_percent_color = win_percent < 50.0 ? "#b85813" : "#588c01";
-	const char* comp_rank_color = player_data.comp_rank != 0 && player_data.comp_rank < 50 ? "#b85813" : "#588c01";
-	char* stats_url = getStatsURL(&player_data);
-
-	snprintf(*data, INFODATA_BUFSIZE, PlayerInfoFormatStr, 
-		player_data.level,
-		prestige,
-		win_percent_color,
-		win_percent,
-		comp_rank_color,
-		player_data.comp_rank,
-		player_data.games,
-		"",
-		"",
-		stats_url
-	);  /* bbCode is supported. HTML is not supported */
-
-	free(prestige);
-	free(stats_url);
-
-	freePlayerData(&player_data);
 }
 
 /* Required to release the memory for parameter "data" allocated in ts3plugin_infoData and ts3plugin_initMenus */
@@ -950,7 +1092,7 @@ void ts3plugin_initMenus(struct PluginMenuItem*** menuItems, char** menuIcon) {
 	 */
 
 	BEGIN_CREATE_MENUS(1);  /* IMPORTANT: Number of menu items must be correct! */
-	CREATE_MENU_ITEM(PLUGIN_MENU_TYPE_CHANNEL, MENU_ID_CHANNEL_1, "Show player stats", "stats.png");
+	CREATE_MENU_ITEM(PLUGIN_MENU_TYPE_CHANNEL, MENU_ID_CHANNEL_1, "Show channel stats", "stats.png");
 	END_CREATE_MENUS;  /* Includes an assert checking if the number of menu items matched */
 
 	/*
@@ -1481,6 +1623,4 @@ void ts3plugin_onMenuItemEvent(uint64 serverConnectionHandlerID, enum PluginMenu
 
 /* Called when client custom nickname changed */
 void ts3plugin_onClientDisplayNameChanged(uint64 serverConnectionHandlerID, anyID clientID, const char* displayName, const char* uniqueClientIdentifier) {
-}
-
 }
